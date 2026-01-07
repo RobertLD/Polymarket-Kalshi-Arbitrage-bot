@@ -107,7 +107,7 @@ impl ExecutionEngine {
             }
         }
 
-        // Get market pair 
+        // Get market pair
         let market = self.state.get_by_id(market_id)
             .ok_or_else(|| anyhow!("Unknown market_id {}", market_id))?;
 
@@ -190,7 +190,7 @@ impl ExecutionEngine {
             });
         }
 
-        // Execute both legs concurrently 
+        // Execute both legs concurrently
         let result = self.execute_both_legs_async(&req, pair, max_contracts).await;
 
         // Release in-flight after delay
@@ -307,7 +307,7 @@ impl ExecutionEngine {
                     contracts as f64,
                 );
                 let (kalshi_res, poly_res) = tokio::join!(kalshi_fut, poly_fut);
-                self.extract_cross_results(kalshi_res, poly_res)
+                self.extract_cross_results(req.arb_type, kalshi_res, poly_res)
             }
 
             // === CROSS-PLATFORM: Kalshi YES + Poly NO ===
@@ -324,7 +324,7 @@ impl ExecutionEngine {
                     contracts as f64,
                 );
                 let (kalshi_res, poly_res) = tokio::join!(kalshi_fut, poly_fut);
-                self.extract_cross_results(kalshi_res, poly_res)
+                self.extract_cross_results(req.arb_type, kalshi_res, poly_res)
             }
 
             // === SAME-PLATFORM: Poly YES + Poly NO ===
@@ -366,6 +366,7 @@ impl ExecutionEngine {
     /// Extract results from cross-platform execution
     fn extract_cross_results(
         &self,
+        arb_type: ArbType,
         kalshi_res: Result<crate::kalshi::KalshiOrderResponse>,
         poly_res: Result<crate::polymarket_clob::PolyFillAsync>,
     ) -> Result<(i64, i64, i64, i64, String, String)> {
@@ -391,7 +392,35 @@ impl ExecutionEngine {
             }
         };
 
-        Ok((kalshi_filled, poly_filled, kalshi_cost, poly_cost, kalshi_order_id, poly_order_id))
+        // IMPORTANT: The rest of the engine interprets this tuple as:
+        // (yes_filled, no_filled, yes_cost, no_cost, yes_order_id, no_order_id)
+        // so we must map platform fills into consistent YES/NO slots.
+        match arb_type {
+            ArbType::PolyYesKalshiNo => Ok((
+                poly_filled,
+                kalshi_filled,
+                poly_cost,
+                kalshi_cost,
+                poly_order_id,
+                kalshi_order_id,
+            )),
+            ArbType::KalshiYesPolyNo => Ok((
+                kalshi_filled,
+                poly_filled,
+                kalshi_cost,
+                poly_cost,
+                kalshi_order_id,
+                poly_order_id,
+            )),
+            _ => Ok((
+                kalshi_filled,
+                poly_filled,
+                kalshi_cost,
+                poly_cost,
+                kalshi_order_id,
+                poly_order_id,
+            )),
+        }
     }
 
     /// Extract results from Poly-only execution (same-platform)

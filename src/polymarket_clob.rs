@@ -3,7 +3,7 @@
 //! This module provides high-performance order execution for the Polymarket CLOB,
 //! including pre-computed authentication credentials and optimized request handling.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
 use base64::Engine;
@@ -164,29 +164,29 @@ struct OrderData<'a> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderStruct {
-    pub salt: u128, 
-    pub maker: String, 
-    pub signer: String, 
+    pub salt: u128,
+    pub maker: String,
+    pub signer: String,
     pub taker: String,
-    #[serde(rename = "tokenId")] 
+    #[serde(rename = "tokenId")]
     pub token_id: String,
-    #[serde(rename = "makerAmount")] 
+    #[serde(rename = "makerAmount")]
     pub maker_amount: String,
-    #[serde(rename = "takerAmount")] 
+    #[serde(rename = "takerAmount")]
     pub taker_amount: String,
-    pub expiration: String, 
+    pub expiration: String,
     pub nonce: String,
-    #[serde(rename = "feeRateBps")] 
+    #[serde(rename = "feeRateBps")]
     pub fee_rate_bps: String,
     pub side: i32,
-    #[serde(rename = "signatureType")] 
+    #[serde(rename = "signatureType")]
     pub signature_type: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SignedOrder { 
-    pub order: OrderStruct, 
-    pub signature: String 
+pub struct SignedOrder {
+    pub order: OrderStruct,
+    pub signature: String
 }
 
 impl SignedOrder {
@@ -482,7 +482,7 @@ impl PolymarketAsyncClient {
         Ok(headers)
     }
 
-    /// Post order 
+    /// Post order
     pub async fn post_order_async(&self, body: String, creds: &PreparedCreds) -> Result<reqwest::Response> {
         let path = "/order";
         let url = format!("{}{}", self.host, path);
@@ -498,7 +498,7 @@ impl PolymarketAsyncClient {
         Ok(resp)
     }
 
-    /// Get order by ID 
+    /// Get order by ID
     pub async fn get_order_async(&self, order_id: &str, creds: &PreparedCreds) -> Result<PolymarketOrderResponse> {
         let path = format!("/data/order/{}", order_id);
         let url = format!("{}{}", self.host, path);
@@ -577,7 +577,7 @@ impl SharedAsyncClient {
         Ok(count)
     }
 
-    /// Execute FAK buy order - 
+    /// Execute FAK buy order -
     pub async fn buy_fak(&self, token_id: &str, price: f64, size: f64) -> Result<PolyFillAsync> {
         debug_assert!(!token_id.is_empty(), "token_id must not be empty");
         debug_assert!(price > 0.0 && price < 1.0, "price must be 0 < p < 1");
@@ -585,7 +585,7 @@ impl SharedAsyncClient {
         self.execute_order(token_id, price, size, "BUY").await
     }
 
-    /// Execute FAK sell order - 
+    /// Execute FAK sell order -
     pub async fn sell_fak(&self, token_id: &str, price: f64, size: f64) -> Result<PolyFillAsync> {
         debug_assert!(!token_id.is_empty(), "token_id must not be empty");
         debug_assert!(price > 0.0 && price < 1.0, "price must be 0 < p < 1");
@@ -628,9 +628,23 @@ impl SharedAsyncClient {
         let order_id = resp_json["orderID"].as_str().unwrap_or("unknown").to_string();
 
         // Query fill status
-        let order_info = self.inner.get_order_async(&order_id, &self.creds).await?;
-        let filled_size: f64 = order_info.size_matched.parse().unwrap_or(0.0);
-        let order_price: f64 = order_info.price.parse().unwrap_or(price);
+        let mut order_info = self.inner.get_order_async(&order_id, &self.creds).await?;
+        let mut filled_size: f64 = order_info.size_matched.parse().unwrap_or(0.0);
+        let mut order_price: f64 = order_info.price.parse().unwrap_or(price);
+
+        // The immediate GET can sometimes lag behind the matching engine/UI.
+        // Poll briefly so we don't incorrectly record a 0-fill and trigger auto-close.
+        if filled_size == 0.0 {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                order_info = self.inner.get_order_async(&order_id, &self.creds).await?;
+                filled_size = order_info.size_matched.parse().unwrap_or(0.0);
+                order_price = order_info.price.parse().unwrap_or(price);
+                if filled_size > 0.0 {
+                    break;
+                }
+            }
+        }
 
         tracing::debug!(
             "[POLY-ASYNC] FAK {} {}: status={}, filled={:.2}/{:.2}, price={:.4}",
@@ -672,7 +686,7 @@ impl SharedAsyncClient {
         let maker_amount_str = maker_amt.to_string();
         let taker_amount_str = taker_amt.to_string();
 
-        // Use references for EIP712 signing 
+        // Use references for EIP712 signing
         let data = OrderData {
             maker: &self.inner.funder,
             taker: ZERO_ADDRESS,
@@ -684,7 +698,7 @@ impl SharedAsyncClient {
             nonce: "0",
             signer: &self.inner.wallet_address_str,
             expiration: "0",
-            signature_type: 1,
+            signature_type: 2,
             salt,
         };
         let exchange = get_exchange_address(self.chain_id, neg_risk)?;
@@ -707,7 +721,7 @@ impl SharedAsyncClient {
                 nonce: "0".to_string(),
                 fee_rate_bps: "0".to_string(),
                 side: side_code,
-                signature_type: 1,
+                signature_type: 2,
             },
             signature: format!("0x{}", sig),
         })
